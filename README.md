@@ -1,5 +1,9 @@
 # burstq
 
+[![ci](https://github.com/Dowgg18/debounced-webhook-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Dowgg18/debounced-webhook-pipeline/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-MIT-2d6a4f)](LICENSE)
+
 **One message is not one message.**
 
 People type the way they talk. A single question arrives as four webhook
