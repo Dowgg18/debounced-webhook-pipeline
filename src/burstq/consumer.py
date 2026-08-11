@@ -198,7 +198,11 @@ class StreamConsumer:
                 await self._ack(sid)
                 return
 
-            await self._window.append(event.conversation_id, event.text, event.event_id)
+            # The stream id travels with the message: it is the only ordering
+            # authority once entries are dispatched concurrently.
+            await self._window.append(
+                event.conversation_id, event.text, event.event_id, stream_id=sid
+            )
 
             # The delivery is now durably inside a window with its own retry
             # semantics, so its idempotency record can be finalised here. Handler

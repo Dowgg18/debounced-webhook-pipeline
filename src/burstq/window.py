@@ -53,27 +53,47 @@ if TYPE_CHECKING:
 
 # Appends a message and (re)schedules the flush deadline atomically.
 #
+# Each entry carries the stream id it came from. The consumer dispatches entries
+# concurrently on purpose, so the order they reach this script is *not* the order
+# they arrived in — two messages 300ms apart can land here in either order. Redis
+# already assigned a monotonic id when the webhook was ingested, so that is the
+# ordering authority; the list is sorted by it on read rather than trusted to be
+# in push order.
+#
 # KEYS[1] window list   KEYS[2] window meta   KEYS[3] due set
-# ARGV[1] text  ARGV[2] event_id  ARGV[3] now  ARGV[4] window  ARGV[5] max_window
-# ARGV[6] list ttl
+# ARGV[1] entry (stream_id \0 event_id \0 text)   ARGV[2] now
+# ARGV[3] window   ARGV[4] max_window   ARGV[5] ttl   ARGV[6] conversation_id
 _APPEND = """
 local first = redis.call('HGET', KEYS[2], 'first_at')
 if not first then
-  first = ARGV[3]
+  first = ARGV[2]
   redis.call('HSET', KEYS[2], 'first_at', first)
 end
 redis.call('RPUSH', KEYS[1], ARGV[1])
-redis.call('RPUSH', KEYS[1] .. ':ids', ARGV[2])
-redis.call('EXPIRE', KEYS[1], ARGV[6])
-redis.call('EXPIRE', KEYS[1] .. ':ids', ARGV[6])
-redis.call('EXPIRE', KEYS[2], ARGV[6])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+redis.call('EXPIRE', KEYS[2], ARGV[5])
 
-local soft = tonumber(ARGV[3]) + tonumber(ARGV[4])
-local hard = tonumber(first) + tonumber(ARGV[5])
+local soft = tonumber(ARGV[2]) + tonumber(ARGV[3])
+local hard = tonumber(first) + tonumber(ARGV[4])
 local deadline = math.min(soft, hard)
-redis.call('ZADD', KEYS[3], deadline, ARGV[7])
+redis.call('ZADD', KEYS[3], deadline, ARGV[6])
 return deadline
 """
+
+_SEP = "\x00"
+
+
+def _stream_order(stream_id: str) -> tuple[int, int]:
+    """Redis stream ids are ``<milliseconds>-<sequence>``.
+
+    Sorting them as strings is wrong the moment a sequence number reaches two
+    digits: ``…-10`` sorts before ``…-9``. Parse both halves.
+    """
+    ms, _, seq = stream_id.partition("-")
+    try:
+        return int(ms), int(seq or 0)
+    except ValueError:
+        return 0, 0
 
 # Claims due conversations by leasing them forward instead of removing them.
 #
@@ -97,15 +117,21 @@ class BurstWindow:
         self._append = redis.register_script(_APPEND)
         self._claim_due = redis.register_script(_CLAIM_DUE)
 
-    async def append(self, conversation_id: str, text: str, event_id: str) -> float:
-        """Buffer one message and return the deadline its conversation now has."""
+    async def append(
+        self, conversation_id: str, text: str, event_id: str, stream_id: str = ""
+    ) -> float:
+        """Buffer one message and return the deadline its conversation now has.
+
+        ``stream_id`` is what makes the merge deterministic. Without it the burst
+        reads back in whatever order concurrent tasks happened to push.
+        """
         list_key = self._keys.window(conversation_id)
         ttl = int(self._settings.max_window_seconds + self._settings.handler_timeout + 60)
+        entry = _SEP.join((stream_id, event_id, text))
         deadline = await self._append(
             keys=[list_key, self._keys.window_meta(conversation_id), self._keys.due_windows],
             args=[
-                text,
-                event_id,
+                entry,
                 time.time(),
                 self._settings.window_seconds,
                 self._settings.max_window_seconds,
@@ -131,27 +157,30 @@ class BurstWindow:
         the same burst is retried. Removing on read would make every handler
         failure a silent data loss.
         """
-        list_key = self._keys.window(conversation_id)
-        pipe = self._redis.pipeline()
-        pipe.lrange(list_key, 0, -1)
-        pipe.lrange(f"{list_key}:ids", 0, -1)
-        parts, ids = await pipe.execute()
-        if not parts:
+        raw = await self._redis.lrange(self._keys.window(conversation_id), 0, -1)
+        if not raw:
             return None
-        texts = [p.decode() if isinstance(p, bytes) else str(p) for p in parts]
-        event_ids = tuple(i.decode() if isinstance(i, bytes) else str(i) for i in (ids or []))
+
+        entries = []
+        for item in raw:
+            value = item.decode() if isinstance(item, bytes) else str(item)
+            stream_id, _, rest = value.partition(_SEP)
+            event_id, _, text = rest.partition(_SEP)
+            entries.append((_stream_order(stream_id), event_id, text))
+
+        # Sorted by the id Redis assigned at ingest, not by push order.
+        entries.sort(key=lambda e: e[0])
+
         return Burst(
             conversation_id=conversation_id,
-            text=" ".join(t for t in texts if t),
-            event_ids=event_ids,
+            text=" ".join(text for _, _, text in entries if text),
+            event_ids=tuple(event_id for _, event_id, _ in entries),
         )
 
     async def discard(self, conversation_id: str) -> None:
         """Remove a window after its burst was handled successfully."""
-        list_key = self._keys.window(conversation_id)
         pipe = self._redis.pipeline()
-        pipe.delete(list_key)
-        pipe.delete(f"{list_key}:ids")
+        pipe.delete(self._keys.window(conversation_id))
         pipe.delete(self._keys.window_meta(conversation_id))
         pipe.zrem(self._keys.due_windows, conversation_id)
         await pipe.execute()

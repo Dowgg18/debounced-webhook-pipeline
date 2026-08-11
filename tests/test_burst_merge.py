@@ -65,6 +65,34 @@ async def test_burst_merge_across_reads(redis, settings, adapter):
     assert handler.calls[0][2] == 2
 
 
+async def test_merge_order_follows_the_stream_not_the_push(redis, settings, adapter):
+    """Regression: the burst read back in push order, not arrival order.
+
+    The consumer dispatches entries concurrently on purpose, so two messages
+    300ms apart can reach the window in either order. Against a fast in-process
+    Redis they happened to arrive sorted; against a real server they did not, and
+    'hi is it still available ?' came back as 'is it still available hi ?'.
+
+    Ordering is not something the pipeline gets to assume. Redis assigns a
+    monotonic id at ingest, and that id is the authority.
+    """
+    handler = RecordingHandler()
+    pipeline = Pipeline(redis, adapter, handler, settings)
+
+    # Append deliberately out of order, exactly as a lost race would.
+    await pipeline.window.append("c9", "second", "e2", stream_id="100-2")
+    await pipeline.window.append("c9", "third", "e3", stream_id="100-10")
+    await pipeline.window.append("c9", "first", "e1", stream_id="100-1")
+
+    burst = await pipeline.window.read("c9")
+
+    assert burst is not None
+    assert burst.text == "first second third"
+    assert burst.event_ids == ("e1", "e2", "e3"), (
+        "sequence 10 must sort after 2, which string comparison gets wrong"
+    )
+
+
 async def test_separate_conversations_do_not_serialise(redis, settings, adapter):
     handler = RecordingHandler()
     pipeline = Pipeline(redis, adapter, handler, settings)
