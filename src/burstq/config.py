@@ -112,6 +112,19 @@ class Settings:
                 "still being processed and the same burst is handled twice."
             )
 
+        # The two-phase claim fixes the mechanism; this fixes its timing. If a
+        # claim can outlive the redelivery it was meant to survive, the crash it
+        # protects against reappears through the other door: the dead worker's
+        # claim is still `pending` when the retry arrives, the retry reads that as
+        # "someone else has it", acks, and the message is gone.
+        if self.processing_ttl >= self.claim_idle_seconds:
+            raise ConfigError(
+                f"processing_ttl ({self.processing_ttl}s) must be shorter than "
+                f"claim_idle_seconds ({self.claim_idle_seconds}s). A claim that "
+                "outlives redelivery makes the retry see IN_FLIGHT, ack, and drop "
+                "the message — the exact loss the two-phase claim exists to prevent."
+            )
+
     # --- Derived -----------------------------------------------------------
     @property
     def claim_idle_ms(self) -> int:

@@ -164,9 +164,16 @@ head:
 | `claim_idle_seconds` | how long before an unacked entry is stolen back |
 | `processing_ttl` | how long an in-flight idempotency claim survives |
 
-If `claim_idle_seconds` is not comfortably larger than the worst case a burst can
-legitimately take, recovery fights live workers. So `Settings` refuses to
-construct:
+Two relationships have to hold, and both were found the hard way.
+
+`claim_idle_seconds` must exceed the worst case a burst can legitimately take, or
+recovery fights live workers. And `processing_ttl` must be *shorter* than
+`claim_idle_seconds`, or the two-phase claim is undone by its own timing: a claim
+that outlives the redelivery it was meant to survive is still `pending` when the
+retry arrives, the retry reads that as "a healthy peer has this", acks, and the
+message is gone. Same loss as failure mode 1, reached through the other door.
+
+So `Settings` refuses to construct:
 
 ```python
 >>> Settings(max_window_seconds=30, handler_timeout=20, claim_idle_seconds=30)

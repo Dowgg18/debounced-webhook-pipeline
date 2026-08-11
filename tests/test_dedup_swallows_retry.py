@@ -109,3 +109,47 @@ def test_config_rejects_a_dedup_window_shorter_than_the_claim(bad_ttls):
     processing, dedup = bad_ttls
     with pytest.raises(ConfigError, match="dedup_ttl"):
         Settings(processing_ttl=processing, dedup_ttl=dedup)
+
+
+async def test_a_claim_that_outlives_redelivery_loses_the_message(redis, keys, settings):
+    """Why processing_ttl must be shorter than claim_idle_seconds.
+
+    Two phases fixed the *mechanism* of the swallowed retry. This is the same
+    loss reached through timing instead: if the dead worker's claim is still
+    alive when recovery redelivers the entry, the retry reads IN_FLIGHT, assumes
+    a healthy peer is on it, acks, and the message is gone.
+
+    Built on a stub rather than ``Settings`` because Settings now refuses this
+    combination outright — which is the point of the test below it. The stub is
+    how the configuration could look before the guard existed.
+    """
+    from types import SimpleNamespace
+
+    # A claim that lasts far longer than the redelivery window.
+    long_claim = SimpleNamespace(processing_ttl=999.0, dedup_ttl=10_000.0)
+    idem = Idempotency(redis, keys, long_claim)
+
+    assert await idem.claim("evt-timing") is ClaimResult.ACQUIRED
+    # ... worker dies here, having committed nothing.
+
+    # Recovery redelivers. The retry asks the same question.
+    verdict = await idem.claim("evt-timing")
+
+    assert verdict is ClaimResult.IN_FLIGHT, (
+        "the dead worker's claim is still standing, so the retry defers to a peer "
+        "that no longer exists — and the consumer acks on IN_FLIGHT"
+    )
+
+
+def test_config_refuses_a_claim_that_outlives_redelivery():
+    from burstq import ConfigError, Settings
+
+    with pytest.raises(ConfigError, match="processing_ttl"):
+        Settings(processing_ttl=300.0, claim_idle_seconds=120.0, dedup_ttl=3600.0)
+
+    with pytest.raises(ConfigError, match="processing_ttl"):
+        Settings(processing_ttl=120.0, claim_idle_seconds=120.0, dedup_ttl=3600.0)
+
+    # The defaults were already safe; now they are guarded rather than lucky.
+    ok = Settings()
+    assert ok.processing_ttl < ok.claim_idle_seconds
