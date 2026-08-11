@@ -113,22 +113,48 @@ class Pipeline:
             "group": self.settings.group,
             "replica_safe_lock": getattr(self.lock, "replica_safe", False),
         }
+        # Reachability is the health question. Everything after it is detail, and
+        # detail that does not exist yet is not a fault: on a fresh deployment the
+        # stream has no entries and no consumer group, and XINFO GROUPS raises
+        # rather than returning empty. Reporting that as "error" would make a
+        # correctly-installed service look broken until its first message.
         try:
             await self.redis.ping()
             info["redis"] = "ok"
-            info["stream_length"] = int(await self.redis.xlen(self.keys.stream))
-            info["dlq_length"] = int(await self.redis.xlen(self.keys.dlq))
-            info["open_windows"] = await self.window.open_windows()
-            for group in await self.redis.xinfo_groups(self.keys.stream):
-                name = group.get(b"name") or group.get("name")
-                name_str = name.decode() if isinstance(name, bytes) else str(name)
-                if name_str == self.settings.group:
-                    info["pending"] = int(group.get(b"pending") or group.get("pending") or 0)
-                    info["consumers"] = int(
-                        group.get(b"consumers") or group.get("consumers") or 0
-                    )
         except Exception as exc:  # noqa: BLE001
             info["redis"] = "error"
             info["error"] = str(exc)
-        info["ok"] = info["redis"] == "ok"
+            info["ok"] = False
+            return info
+
+        info["ok"] = True
+        info["stream_length"] = await self._safe_len(self.keys.stream)
+        info["dlq_length"] = await self._safe_len(self.keys.dlq)
+        info["pending"] = 0
+        info["consumers"] = 0
+
+        try:
+            info["open_windows"] = await self.window.open_windows()
+        except Exception:  # noqa: BLE001
+            info["open_windows"] = 0
+
+        try:
+            groups = await self.redis.xinfo_groups(self.keys.stream)
+        except Exception:  # noqa: BLE001
+            groups = []  # stream not created yet
+
+        for group in groups:
+            name = group.get(b"name") or group.get("name")
+            name_str = name.decode() if isinstance(name, bytes) else str(name)
+            if name_str == self.settings.group:
+                info["pending"] = int(group.get(b"pending") or group.get("pending") or 0)
+                info["consumers"] = int(group.get(b"consumers") or group.get("consumers") or 0)
+                break
+
         return info
+
+    async def _safe_len(self, key: str) -> int:
+        try:
+            return int(await self.redis.xlen(key))
+        except Exception:  # noqa: BLE001
+            return 0
