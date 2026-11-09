@@ -239,7 +239,7 @@ uses a real Redis, across Python 3.11–3.13.
 
 ## Observability
 
-Prometheus metrics are optional (`pip install burstq[metrics]`) and degrade to
+Prometheus metrics are optional (the `metrics` extra: `pip install -e ".[metrics]"`) and degrade to
 no-ops rather than failing the import.
 
 `burstq_stream_pending` is the one to alert on: if it grows, the consumer is
