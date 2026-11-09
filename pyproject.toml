@@ -20,6 +20,12 @@ dev = [
     "fakeredis[lua]>=2.23",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Dowgg18/debounced-webhook-pipeline"
+Source = "https://github.com/Dowgg18/debounced-webhook-pipeline"
+Issues = "https://github.com/Dowgg18/debounced-webhook-pipeline/issues"
+Changelog = "https://github.com/Dowgg18/debounced-webhook-pipeline/blob/main/CHANGELOG.md"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
