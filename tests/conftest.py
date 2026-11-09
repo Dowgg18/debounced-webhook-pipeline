@@ -12,6 +12,27 @@ from burstq.types import InboundEvent
 
 REDIS_URL = os.environ.get("BURSTQ_TEST_REDIS", "redis://localhost:6379/15")
 
+# Whether REDIS_URL answered, decided once per session. Without a server, a
+# failed ping costs about 4 s (redis-py retries the connect with backoff), and
+# paying that in every test made the no-Docker run take two minutes.
+_real_redis: bool | None = None
+
+
+async def _real_redis_reachable() -> bool:
+    global _real_redis
+    if _real_redis is None:
+        from redis.asyncio import Redis
+
+        probe = Redis.from_url(REDIS_URL, socket_connect_timeout=1.0)
+        try:
+            await probe.ping()
+            _real_redis = True
+        except Exception:
+            _real_redis = False
+        finally:
+            await probe.aclose()
+    return _real_redis
+
 
 @pytest_asyncio.fixture
 async def redis():
@@ -24,11 +45,9 @@ async def redis():
     """
     from redis.asyncio import Redis
 
-    client = Redis.from_url(REDIS_URL)
-    try:
-        await client.ping()
-    except Exception:
-        await client.aclose()
+    if await _real_redis_reachable():
+        client = Redis.from_url(REDIS_URL)
+    else:
         try:
             import fakeredis.aioredis as fakeredis
         except ImportError:  # pragma: no cover
